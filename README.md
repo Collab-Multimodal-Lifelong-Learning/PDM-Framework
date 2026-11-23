@@ -109,3 +109,7 @@ uv run --locked --extra cpu python -m pytest -q
 ```
 
 The viewer tests use the system FFmpeg executable. A locally available Chromium browser enables the offline interaction test. The tests cover split validation, answer-label isolation, video sampling, evidence selection, gradient ranking, real optimizer updates, replay provenance, checkpoint reload, and the result viewer.
+
+## Acknowledgment
+
+This research is associated with the Korean national R&D project **“Developing a Sustainable Collaborative Multi-modal Lifelong Learning Framework” (Project No. 2022-0-00113)**, conducted within the *Human-Centered AI Core Technology Development* program, supported by the Ministry of Science and ICT (MSIT) and administered by the Institute of Information & Communications Technology Planning & Evaluation (IITP).
