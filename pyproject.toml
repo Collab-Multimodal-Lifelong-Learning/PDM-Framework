@@ -1,0 +1,47 @@
+[project]
+name = "pdm-framework"
+version = "0.1.0"
+description = "Continual video question answering with bounded memory and replay"
+requires-python = ">=3.11,<3.12"
+dependencies = ["av==15.1.0", "numpy>=1.26,<3", "safetensors>=0.5,<0.8"]
+
+[project.optional-dependencies]
+cpu = ["torch==2.7.1"]
+gpu = ["torch==2.7.1", "torchvision==0.22.1", "transformers==4.52.4", "peft==0.15.2", "accelerate==1.7.0"]
+
+[project.scripts]
+pdm-videoqa = "pdm.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<9"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["pdm"]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "gpu" }]]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", extra = "cpu" }, { index = "pytorch-cu128", extra = "gpu" }]
+torchvision = { index = "pytorch-cu128", extra = "gpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.setuptools.package-data]
+pdm = ["configs/*.json"]
+
+[tool.setuptools.data-files]
+"share/pdm-framework/licenses/vlm-rlaif" = ["third_party/vlm-rlaif/LICENSE"]

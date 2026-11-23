@@ -1,0 +1,27 @@
+# Internal PDM strategy drafts
+PDM_Framework_Strategy_v*.md
+
+# Local environments and credentials
+.venv/
+.env
+.env.*
+!.env.example
+
+# Python caches and packaging output
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Generated videos, model checkpoints, metrics, and HTML reports
+runs/
+/outputs/
+
+# Local NExT-QA media and model downloads
+/data/nextqa/
+/nextqa/
+/.cache/
+*.safetensors

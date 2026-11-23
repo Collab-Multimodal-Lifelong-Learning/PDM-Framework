@@ -1,198 +1,111 @@
-# PDM Framework
+# PDM Framework · Continual VideoQA
 
-**A shared integration repository for collaborative multimodal continual learning**
+PDM answers a multiple-choice question about a video, locates an estimated evidence interval, and learns from a stream of labeled questions. Its first application uses Qwen2.5-VL on NExT-QA. Train on temporal questions, update on causal questions, then ask the original temporal questions again. The report shows which answers changed, how much earlier-task accuracy was retained, and what the updates cost.
 
-> **Project:** Developing a Sustainable Collaborative Multi-modal Lifelong Learning Framework  
-> **Organization:** [Collab-Multimodal-Lifelong-Learning](https://github.com/Collab-Multimodal-Lifelong-Learning)  
-> **Status:** Integration planning / initial development  
-> **Proposed pilot application:** Video Question Answering (VideoQA)
+## How PDM learns and answers
 
-> [!IMPORTANT]
-> This README is a **working development plan**, not a claim that the described system has already been implemented. The PDM model specification, integration interfaces, VideoQA benchmark, and continual-learning protocol require agreement among the participating teams. The full expansion of “PDM” has not yet been confirmed here.
+| Component | What the code does | Source |
+| --- | --- | --- |
+| **P · Pre-trained model** | Qwen2.5-VL scores five choices from eight sampled video frames. It chooses an answer on the full clip, then rescores four time windows to find the strongest support for that answer. Training updates rank-8 LoRA weights on the language decoder's query and value projections. | [Video scoring and evidence selection](pdm/models.py) |
+| **D · Data and selection** | The importer builds clip-disjoint train, validation, and test splits. For PDM training, the selector ranks current questions by the size of their loss gradients on the last decoder block's LoRA weights and penalizes directions already represented in the batch. | [Dataset and model inputs](pdm/data.py) · [Gradient-based selection](pdm/continual.py) |
+| **M · Memory** | A bounded FIFO stores labeled training questions. PDM replays one earlier example per four-example update while memory permits. The retrieval-only baseline uses up to three stored question/answer pairs as inference context. | [Memory, retrieval, and replay](pdm/continual.py) |
 
-## 1. Overview
+The controller saves the adapter and replay IDs after each task and evaluates all tasks seen so far on fixed test clips. In the verified GPU run, the causal-task update used **three new causal questions and one earlier temporal question**. The adapter weights changed. Final accuracy on the six held-out questions matched the frozen model at 3/6. [Experiment and checkpoint code](pdm/experiment.py) · [Results viewer](pdm/report.py)
 
-This repository is the **single shared codebase** in which participating research teams jointly develop, assemble, evaluate, and demonstrate the integrated **PDM framework**.
+## Run the application
 
-Each team's independent research results—papers, experiments, and standalone implementations—remain in the corresponding research-domain repository. This repository is reserved for **components that are actually integrated into the common PDM system**, shared interfaces, end-to-end experiments, and the final application/demo.
+Use Linux x86-64, Python 3.11, and uv. Run the commands from this repository. Each experiment creates a new output directory. Keep the generated HTML and its media together for playback.
 
-Our long-term objective is to support **sustainable multimodal continual learning**: adapting to incoming tasks or data while preserving previously acquired knowledge, without requiring the entire system to be rebuilt from scratch each time.
+**CPU demo.** One command generates 120 four-second color clips, runs all six conditions, saves the adapters, and creates a local video viewer. This fixture uses a rank-2 LoRA adapter on RGB features and exercises video decoding, backpropagation, and replay. Its model supports the two color questions shown in the viewer.
 
-### Relationship to the research repositories
-
-| Repository | Primary purpose |
-| --- | --- |
-| `Continual-Learning-and-Multimodal-Integration` | Research on continual-learning modeling and multimodal integration |
-| `Continual-Learning-Language-Domain` | Language-domain methods and research outputs |
-| `Continual-Learning-Vision-Domain` | Vision-domain methods and research outputs |
-| `Continual-Learning-Time-Series-Domain` | Time-series-domain methods and research outputs |
-| **`PDM-Framework` (this repository)** | **One jointly maintained, runnable, integrated framework and application** |
-
-A method developed in another repository should be brought here only when it has a clear role in the integration, a maintained interface, and a reproducible way to evaluate it.
-
-## 2. Proposed first application: Continual VideoQA
-
-As an initial integration target, we propose **Video Question Answering (VideoQA)**, in which a system answers natural-language questions about video content. VideoQA is a useful candidate because it connects **visual/temporal understanding**, **language understanding**, **multimodal reasoning**, and **continual adaptation** in a single application.
-
-**Illustrative workflow**
-
-1. Receive a video clip and a natural-language question.
-2. Extract video/temporal features and encode the question.
-3. Combine the modalities to produce an answer.
-4. Introduce new video domains, question types, or tasks sequentially.
-5. Adapt the PDM system using the agreed continual-learning method.
-6. Evaluate answers on both **new** and **previously learned** settings to measure learning and forgetting.
-
-> **Not yet decided:** The VideoQA dataset(s), answer format (multiple choice or open-ended), task/domain sequence, whether task IDs are available at inference time, and what parameters or memories may be updated. These decisions must be documented before reporting results.
-
-### Conceptual pipeline (proposed)
-
-```mermaid
-flowchart LR
-    V[Video input] --> VE[Video / temporal encoder]
-    Q[Natural-language question] --> TE[Text encoder]
-    VE --> F[Multimodal fusion]
-    TE --> F
-    F --> P[PDM continual-learning component]
-    P <--> M[Optional memory / adaptation mechanism]
-    P --> H[VideoQA prediction head]
-    H --> A[Answer]
-    A --> E[Evaluation: VideoQA and forgetting]
+```bash
+uv run --locked --python 3.11 --extra cpu python -m pdm demo --out runs/my-cpu-demo
 ```
 
-This diagram shows **integration responsibilities**, not a finalized internal architecture. The positioning and implementation of the PDM component will be revised once its formal specification is agreed upon.
+Open `runs/my-cpu-demo/report.html`. Select a clip and question, compare methods before and after the second task, then choose **Play evidence**. The highlighted interval is the highest-scoring quarter of the clip for the predicted answer. The CPU report also includes a paired example where an aligned sensor event changes the selected interval.
 
-## 3. Scope of this repository
+**Real-video demo.** On an NVIDIA GPU with native BF16 and a CUDA 12.8-compatible driver, use the same application with a pretrained model. The first run downloads the pinned Qwen weights and the selected official NExT-QA videos. The video cache defaults to `~/.cache/pdm-framework/nextqa` and can be changed with `--data-dir`. [Qwen model](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/tree/66285546d2b821cf421d4f5eb2576359d3770cd3) · [NExT-QA data and attribution](https://github.com/doc-doc/NExT-QA/tree/2432e9724f88ed9f40010e2989f104570a91de4e)
 
-### In scope
-
-- A common **training, adaptation, and inference pipeline** for the integrated PDM model.
-- Video and text processing modules required by the selected VideoQA application.
-- A well-defined interface for plugging in models or methods contributed by the research teams.
-- Continual-learning task streams, data loaders, experiment configurations, and evaluation.
-- Scripts and documentation for an **end-to-end VideoQA demonstration**.
-- Reproducible baselines, integration tests, and release-ready artifacts approved for sharing.
-
-### Out of scope
-
-- Duplicating every team's paper-specific code or full experimental history.
-- Uploading raw proprietary videos, private data, credentials, or unlicensed model weights.
-- Treating proposed design choices or preliminary results as validated achievements.
-
-## 4. Proposed repository structure
-
-The following is a **target layout**. Directories and scripts will be added as implementation work begins.
-
-```text
-PDM-Framework/
-├── README.md                  # Project scope, workflow, and documentation
-├── docs/
-│   ├── architecture.md        # Approved PDM architecture and interfaces
-│   ├── integration.md         # Component ownership and integration guide
-│   └── experiments.md         # Evaluation protocol and reproducibility
-├── configs/                   # Version-controlled experiment configurations
-├── pdm/
-│   ├── encoders/              # Video / language encoders or adapters
-│   ├── fusion/                # Multimodal fusion components
-│   ├── continual/             # PDM updates, adaptation, and memory logic
-│   ├── tasks/                 # VideoQA task and prediction interfaces
-│   └── evaluation/            # VideoQA and continual-learning metrics
-├── scripts/                   # Training, evaluation, and demo entry points
-├── tests/                     # Unit and integration tests
-└── examples/                  # Minimal reproducible examples
+```bash
+uv run --locked --python 3.11 --extra gpu python -m pdm demo \
+  --profile nextqa-quick --device cuda:0 --out runs/my-videoqa-demo
 ```
 
-**Interface agreement before integration:** Each contributed component should document its input/output format, model dependencies, expected checkpoints, supported task scenarios, and a minimal test. Integration should rely on stable interfaces rather than copying disconnected research scripts.
+Open `runs/my-videoqa-demo/report.html`. The real-video demo uses 8 training, 2 validation, and 3 test questions **per task**. Each test answer represents one third of that task's accuracy. Use this run to inspect individual answers and verify integration. For a larger experiment use the benchmark command below.
 
-## 5. Experiment and evaluation plan
+**Verified run (seed 42).** On an RTX PRO 6000, all six methods answered 2/3 temporal questions and 1/3 causal questions correctly after both tasks. Switching the frozen model's frame sampler changed two predictions (3/6 correct with timestamp sampling, 2/6 with frame-index sampling).
 
-We will use a **shared evaluation protocol** so that independently developed components can be assessed in the same end-to-end setting.
+### Answer a new question
 
-| Area | What to measure or document |
+The GPU `ask` command accepts a local video and exactly five choices. It prints the selected answer, five raw logits, the evidence interval in milliseconds, and the scores for the candidate windows.
+
+```bash
+uv run --locked --extra gpu python -m pdm ask --device cuda:0 \
+  --clip /path/to/video.mp4 --question "What happens after the door opens?" \
+  --choice "Someone enters" --choice "The lights go out" --choice "The door closes" \
+  --choice "A bell rings" --choice "The camera moves"
+```
+
+To ask with a trained model, use `predict --run-dir RUN --condition pdm --stage 2` with the same new-clip arguments or a saved sample ID. Here `--stage` selects the checkpoint after the first or second **learning task**. The example below reproduces a prediction from the CPU demo.
+
+```bash
+uv run --locked --extra cpu python -m pdm predict \
+  --run-dir runs/my-cpu-demo --condition pdm --stage 2 --sample-id s1-test-000:q01
+```
+
+For a real held-out example, reload the PDM checkpoint and ask what the man in blue is holding. The verified prediction was **“camera”**, with estimated evidence from **0 to 7.249 seconds**.
+
+```bash
+uv run --locked --extra gpu python -m pdm predict \
+  --run-dir runs/my-videoqa-demo --condition pdm --stage 2 --sample-id '3606510307:9:TC'
+```
+
+### Run a larger benchmark
+
+For a local copy of the official annotations and media, use the pinned train/val/test CSVs and videos named `<video_id>.mp4` under one directory. The importer verifies annotation checksums, clips, unique question IDs, and split isolation. The larger profile selects up to 128 training, 64 validation, and 128 test questions per task using a stable hash of each ID. The subsets stay fixed when the optimizer seed changes. [Official annotations](https://github.com/doc-doc/NExT-QA/tree/2432e9724f88ed9f40010e2989f104570a91de4e/dataset/nextqa)
+
+```bash
+uv run --locked --extra gpu python -m pdm prepare-nextqa \
+  --annotations /data/nextqa/annotations --videos /data/nextqa/videos --out runs/data/nextqa.jsonl
+uv run --locked --extra gpu python -m pdm run --config configs/nextqa.json \
+  --manifest runs/data/nextqa.jsonl --device cuda:0 --seed 42 --out runs/nextqa-42
+```
+
+## Compare learning methods
+
+| Report condition | Current-task sample selection | Previous-task memory |
+| --- | --- | --- |
+| `frozen` | Fixed starting weights | Empty |
+| `retrieval` | Fixed starting weights | Retrieved context at inference |
+| `lora` | Seeded order | Empty |
+| `pdm` | Gradient magnitude and diversity | Replay during training |
+| `pdm_uniform` | Seeded order | Replay during training |
+| `pdm_no_replay` | Gradient magnitude and diversity | Empty |
+
+Each condition starts independently. The trained conditions receive the same optimizer-step and effective-batch budgets. The small real-video demo takes one AdamW step per task, the larger benchmark takes 16, and the CPU demo takes eight. `--conditions frozen pdm` runs a selection of methods. The default runs all six.
+
+## Inspect the results
+
+| Output | Contents |
 | --- | --- |
-| **VideoQA quality** | Answer accuracy or the benchmark's official QA metric |
-| **Continual learning** | Performance after each sequential task/domain; average performance across seen tasks |
-| **Forgetting** | Change in performance on previously learned tasks after subsequent updates |
-| **Adaptation** | Performance on newly introduced video domains or question types |
-| **Efficiency** | Training/update cost, inference cost, and any memory/replay budget |
-| **Reproducibility** | Data split, task order, random seed, model version, environment, and command used |
+| `report.html` | Video playback, answers by method and checkpoint, annotated and estimated intervals when available, accuracy and resource tables |
+| `run.json`, `manifest.jsonl` | Run status, resolved configuration, environment, revisions, checksums, and the exact input records |
+| `metrics.json`, `predictions.jsonl` | Accuracy for every evaluated task/checkpoint pair, individual predictions, evidence scores and labels |
+| `checkpoints/<condition>/stage-<n>/` | Adapter tensors for trained methods, training-memory IDs, parameter fingerprints, selected and replayed IDs |
+| `sensor_comparison.json`, `sampler_comparison.json` | The paired sensor example on CPU and the frozen frame-sampler comparison on GPU, when enabled |
 
-For a meaningful comparison, we should include at least an **initial/baseline model**, an **agreed continual-learning baseline**, and the **integrated PDM implementation** under matched settings. Exact metrics, baselines, and datasets will be finalized by the team; no benchmark result is claimed in this README.
+The accuracy matrix has one row per checkpoint and one column per task. **Forgetting** is the earlier task's best observed accuracy minus its current accuracy. **Adaptation gain** compares the newly learned task with the frozen model at the same checkpoint. The report also includes inference latency, update time including selection, peak allocated GPU memory, and evidence IoU for samples with labeled intervals. Timing uses an untimed validation forward pass and initializes the optimizer runtime before measurement. Video caches start empty for each timed update and held-out evaluation. NExT-QA answer labels support answer accuracy. The viewer's NExT-QA evidence intervals are model estimates.
 
-### Minimum end-to-end demo
+For a new clip, optional `--sensor-csv` accepts strictly increasing `timestamp_ms,value` measurements on the clip clock. The model chooses the answer from video, then ranks evidence windows using 80% video confidence and 20% normalized sensor deviation.
 
-A first demonstrator is considered ready when another contributor can:
+## Research code and tests
 
-1. Obtain the documented, authorized dataset or a shareable toy example.
-2. Set up the environment from the repository instructions.
-3. Run VideoQA inference and inspect a predicted answer.
-4. Run at least one sequential adaptation scenario.
-5. Reproduce a before/after evaluation showing performance on earlier and later tasks.
+The four sibling collections hold 60 pinned study repositories. [Vision](https://github.com/Collab-Multimodal-Lifelong-Learning/Continual-Learning-Vision-Domain) · [Language](https://github.com/Collab-Multimodal-Lifelong-Learning/Continual-Learning-Language-Domain) · [Time series](https://github.com/Collab-Multimodal-Lifelong-Learning/Continual-Learning-Time-Series-Domain) · [Multimodal integration](https://github.com/Collab-Multimodal-Lifelong-Learning/Continual-Learning-and-Multimodal-Integration)
 
-## 6. Collaboration workflow
+PDM integrates the VLM-RLAIF frame-index sampling rule as a paired comparison against timestamp sampling. Its OASIS-inspired selector uses per-example LoRA gradients at the start of each task and penalizes redundancy with previously selected examples. These adapters run inside this repository without sibling checkouts. [VLM-RLAIF source](https://github.com/Collab-Multimodal-Lifelong-Learning/vlm-rlaif/blob/610cac72c16ae3862b0d83a0dc3708d73a42a4cc/Evaluation/infer_utils.py) · [Sampler license](third_party/vlm-rlaif/LICENSE) · [OASIS paper](https://aclanthology.org/2026.acl-long.158/) · [Reference trainer](https://github.com/Collab-Multimodal-Lifelong-Learning/oasis/blob/96e67e159397b851c4cc80cae559cef00370a8cf/selection_methods/oasis.py)
 
-This is **one integration repository**, jointly owned by the participating teams. Research-domain repositories continue to serve as sources of individual results; the integration repository is the source of truth for the combined software.
+```bash
+uv run --locked --extra cpu python -m pytest -q
+```
 
-1. **Create an Issue** describing a component, experiment, interface change, or integration problem. Include the expected output and acceptance criteria.
-2. **Agree on the interface** before implementing a component that other teams depend on.
-3. **Create a feature branch** (for example, `feat/video-encoder`, `feat/continual-adaptation`, or `eval/videoqa-baseline`).
-4. **Open a Pull Request (PR)** with a concise summary, linked Issue, implementation notes, test results, and any external dependencies.
-5. **Request review** from the relevant component contributor and an integration maintainer before merging.
-6. **Keep `main` reproducible**: merge tested changes, update documentation, and avoid committing large datasets or secrets.
-
-### Suggested contribution areas
-
-| Workstream | Contribution |
-| --- | --- |
-| PDM integration | Agree on the PDM specification, shared interface, and update/training pipeline |
-| Video / temporal modeling | Video loading, feature extraction, and temporal representation |
-| Language / QA | Question encoding, answer prediction, and language-side evaluation |
-| Multimodal modeling | Cross-modal fusion and integration with the common PDM pipeline |
-| Evaluation / demo | Sequential VideoQA benchmark, forgetting analysis, reproducibility, and demonstration |
-
-Assignments and maintainers are **to be decided**; the table lists workstreams rather than assigning responsibilities to any institution or person.
-
-## 7. Using Claude Code for joint development
-
-The team has discussed **Claude Code as a development assistant**. Its proposed role is to help contributors understand the shared codebase, implement well-scoped modules, create tests, and prepare PRs. **Claude Code is not, by itself, the PDM algorithm or the VideoQA model.** All suggested changes require human review and experimental validation.
-
-**Suggested workflow for assisted development:**
-
-1. Select an Issue with an agreed interface and measurable completion criteria.
-2. Work on a dedicated feature branch and provide the assistant with the relevant module and specification.
-3. Request a small, reviewable change **plus tests**, rather than an unverified repository-wide rewrite.
-4. Run tests and experiments locally; verify model behavior, data handling, licenses, and dependencies.
-5. Open a PR describing what was generated or assisted, what was manually checked, and what remains unverified.
-
-Never paste private datasets, unpublished confidential material, credentials, or access tokens into an external assistant without appropriate authorization.
-
-## 8. Integration milestones (proposed)
-
-- [ ] **M0 — Specify:** Confirm the meaning/requirements of PDM, select the VideoQA application setting, and assign maintainers.
-- [ ] **M1 — Baseline:** Deliver a minimal runnable VideoQA baseline and shared evaluation protocol.
-- [ ] **M2 — Components:** Integrate the agreed video, language, multimodal, and continual-learning modules.
-- [ ] **M3 — Continual VideoQA:** Run sequential tasks/domains with retention and adaptation measurements.
-- [ ] **M4 — Demonstration:** Prepare a reproducible application demo, documentation, and approved public artifacts.
-
-These milestones describe a **proposed workflow**, not completed deliverables or committed dates.
-
-## 9. Decisions to confirm at the kickoff discussion
-
-- **PDM specification:** What does PDM stand for, and what algorithmic behavior is required of the integrated model?
-- **Application:** Is VideoQA the final initial demo, and what user-facing behavior should it show?
-- **Benchmark:** Which VideoQA dataset, task sequence, domain shifts, and answer format will be used?
-- **Learning protocol:** What is updated across stages, what replay/memory budget is permitted, and how will forgetting be measured?
-- **Interfaces and ownership:** Which team maintains each component, and who reviews cross-module changes?
-- **Release policy:** Which data, checkpoints, code, and results can be published publicly?
-
-Please record decisions as GitHub Issues or in `docs/architecture.md` and update this README once the shared design is approved.
-
-## 10. Getting started
-
-The repository is currently intended as a **coordination and integration starting point**. Installation, training, and demo commands will be added after the initial implementation and dependencies are merged. Do not assume the proposed directories or scripts above already exist.
-
-To participate, open an Issue for the workstream you plan to contribute to, coordinate the required interface, and submit changes through a Pull Request.
-
-## Acknowledgments
-
-This repository supports the joint research project **“Developing a Sustainable Collaborative Multi-modal Lifelong Learning Framework.”** Contributions from participating research teams will be credited alongside integrated modules and releases.
+The viewer tests use the system FFmpeg executable. A locally available Chromium browser enables the offline interaction test. The tests cover split validation, answer-label isolation, video sampling, evidence selection, gradient ranking, real optimizer updates, replay provenance, checkpoint reload, and the result viewer.
