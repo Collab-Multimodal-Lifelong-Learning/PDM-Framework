@@ -1,37 +1,25 @@
 # PDM-Framework
 
-[한국어 요약](README_ko.md) · [Recorded benchmark](benchmarks/agent-42.json)
+[한국어 안내](README_ko.md)
 
-PDM (*Pre-trained, Data, Memory*) trains a browser agent to reserve tables on OpenDining and then book rides on UDriver. Both are simulated services. The experiment tests whether replaying earlier restaurant actions during ride training helps the agent complete a restaurant request afterward.
+PDM-Framework trains a multimodal browser agent across two simulated services. On **OpenDining**, the agent follows a restaurant reservation request. On **UDriver**, it follows a ride request. You can give a saved agent your own instruction, compare checkpoints on the same benchmark tasks, and inspect the browser actions behind each booking.
 
-## What the experiment showed
+## How the agent works
 
-The table counts completed bookings on **two held-out requests** with seed 42. Each checkpoint condition ran once per request, with a limit of 25 browser actions. The two methods shared the restaurant checkpoint and evaluated it in separate browser sessions.
+At each step, the policy receives the user's instruction, a screenshot, the current URL, a numbered accessibility tree and recent actions. It generates one command, such as clicking a time slot or filling a pickup field. Chromium executes the command and returns the next observation. The trace preserves the model's response, the parsed action and any browser error. [Browser runtime](pdm/browser.py)
 
-| Checkpoint | Birthday dinner reservation | Ride on a new route |
-| --- | ---: | ---: |
-| Frozen model | 0/1 | 0/1 |
-| After restaurant training (shared weights, two sessions per request) | 0/2 | 0/2 |
-| After ride training, sequential | 0/1 | 1/1 |
-| After ride training, with replay | 0/1 | 1/1 |
+| Site | Example instruction | What to inspect in the final state |
+| --- | --- | --- |
+| `opendining` | Reserve a table for two at the first available time. | Restaurant, party size and reservation time |
+| `udriver` | Book a Comfort ride from Local Edition to Golden Farmer Market and pay with cash. | Pickup, destination, vehicle class and payment method |
 
-Both final adapters booked the new ride in 15 actions. None of the five dinner attempts succeeded, so this run provides no evidence that replay improves held-out restaurant success. The ten episodes all received scores. [Per-episode scores and adapter hashes](benchmarks/agent-42.json)
+**PDM** stands for *Pre-trained, Data, Memory*. The pre-trained policy is Qwen2.5-VL-3B-Instruct with a rank-8 LoRA adapter. The training data pairs each demonstrated action with the screen and page elements visible immediately before it. A scripted demonstrator verifies each booking against the site's record before publishing the training manifest. [Policy](pdm/web_model.py) · [Demonstration collector](pdm/web_collect.py)
 
-**Repeating a training request.** In a separate check, the final replay adapter was asked twice to book the first listed restaurant for two. Both sessions produced a reservation in six actions. Only one matched the request. It booked Vintage Bites at 12:30 PM. The other booked the second restaurant, Evening Delight, at 1:00 PM.
-
-## How the agent learns
-
-| Component | Implementation |
-| --- | --- |
-| **Pre-trained model** | Qwen2.5-VL-3B-Instruct reads the instruction, screenshot, accessibility tree and action history. A rank-8 LoRA adapter learns to generate one browser action at a time. [Policy](pdm/web_model.py) |
-| **Data** | The collector verifies the site's final records for two reservations and two rides. Each training example pairs the observation before a step with the action taken. This run yielded 12 restaurant actions and 29 ride actions. [Collector](pdm/web_collect.py) |
-| **Memory** | Reservoir sampling keeps eight restaurant actions. During ride training, replay pairs a current ride action with a stored restaurant action. Sequential training pairs it with another ride action. [Training loop](pdm/web.py) |
-
-The shared restaurant adapter received 24 updates. Each ride-training method then received 58 updates, using a fresh AdamW optimizer and the same current-action order. On the original demonstrations, replay reduced the final mean restaurant action loss from 0.177 (sequential) to 0.122. Ride action losses were 0.120 and 0.136, respectively. These losses measure how closely the model imitates demonstrated actions. The booking scores above use the simulated site's final state. [Browser runtime](pdm/browser.py) · [Evaluator](pdm/web_eval.py)
+The agent learns restaurant reservations first. Two training methods then start from that same adapter. In **sequential training**, each update uses two ride actions. In **replay**, it uses one ride action and one earlier restaurant action drawn from a bounded memory. Both methods see the same current-action order and receive the same number of updates. Evaluating both services after the switch lets you examine new learning and retention separately. [Training loop](pdm/web.py)
 
 ## Install
 
-Run from the repository root on Linux x86-64 with Python 3.11 and uv. Training and inference require a CUDA GPU with native BF16 support. Collection and evaluation need Chromium and network access to the simulated sites. The first model load downloads the pinned Qwen weights.
+Run from the repository root on Linux x86-64 with Python 3.11 and uv. Training and inference require a CUDA GPU with native BF16 support. The browser environment uses Chromium and the public AGI SDK. It needs network access to the simulated sites. The first model load also downloads the pinned Qwen weights.
 
 ```bash
 uv sync --locked --extra gpu --python 3.11
@@ -39,44 +27,50 @@ uv sync --project browser-env --locked --python 3.11
 browser-env/.venv/bin/python -m playwright install --with-deps --only-shell chromium
 ```
 
-## Collect, train and evaluate
+## Collect demonstrations and train
 
-Use fresh collection and training directories. Both training methods run from the same manifest. Evaluation starts its own local policy server.
-
-```bash
-.venv/bin/pdm-agent collect --out runs/agent-demos
-
-.venv/bin/pdm-agent train --manifest runs/agent-demos/manifest.jsonl \
-  --out runs/agent-42 --passes 2 --capacity 8 --seed 42
-
-.venv/bin/pdm-agent evaluate --run runs/agent-42 --out runs/evaluation-42 --max-steps 25
-```
-
-Open `runs/evaluation-42/web-summary.json` for per-service scores and the number of episodes scored. To inspect the final replay agent's ride, read `runs/evaluation-42/checkpoints/replay-udriver/episodes/v2.udriver-4/trace.jsonl` alongside the screenshots and `state.json` in that directory.
-
-To reproduce the demonstration losses, run the following command. It writes `demonstration-fit.json` next to the saved adapters in `runs/agent-42/`.
+Use fresh output directories. The collector writes the manifest and screenshots together. Training saves the shared restaurant adapter and one final adapter for each ride-training method. Here `--capacity 8` sets the maximum number of restaurant actions kept for replay.
 
 ```bash
-.venv/bin/pdm-agent score-demos --run runs/agent-42 --manifest runs/agent-demos/manifest.jsonl
+.venv/bin/pdm-agent collect --out runs/demos
+.venv/bin/pdm-agent train --manifest runs/demos/manifest.jsonl \
+  --out runs/agent --passes 2 --capacity 8 --seed 42
 ```
 
-## Run an instruction
+## Give the agent an instruction
 
-After training, use `ask` to load a saved adapter and open a fresh browser. The following example repeats the practice request described above.
+`ask` loads the checkpoint, starts a local policy endpoint and opens a fresh browser on the selected site. Supply your own request with `--goal` and a new session directory with `--out`.
 
 ```bash
-.venv/bin/pdm-agent ask --checkpoint runs/agent-42/replay-udriver.safetensors \
-  --site opendining --out runs/practice-agent \
-  --goal "Reserve a table for two at the first restaurant in the home page's list of available restaurants. Choose its first offered time today. Use phone 4155550146 and email diner@example.com."
+.venv/bin/pdm-agent ask --checkpoint runs/agent/replay-udriver.safetensors \
+  --site udriver --out runs/my-ride \
+  --goal "Book a Comfort ride from Local Edition to Golden Farmer Market and pay with cash."
 ```
 
-Read `runs/practice-agent/trace.jsonl` to inspect the clicks and `runs/practice-agent/state.json` to verify which restaurant and time were booked.
+For this request, inspect `runs/my-ride/trace.jsonl` to see how the agent selected a vehicle and `runs/my-ride/state.json` to check the recorded trip. A free-form request has no benchmark score.
 
-## Tests
+## Evaluate checkpoints
+
+`evaluate` runs the frozen policy, the restaurant checkpoint for each method and the two final ride adapters. Each condition gets the same held-out requests and action budget. The SDK scores each task using the site's final state and the agent's answer. The summary reports per-service success and the change in restaurant success after ride training. Unavailable episodes are counted separately. [Evaluator and supported task IDs](pdm/web_eval.py)
 
 ```bash
-uv run --isolated --locked --extra cpu python -m pytest -q
+.venv/bin/pdm-agent evaluate --run runs/agent --out runs/evaluation \
+  --tasks v2.opendining-5 v2.udriver-4 --max-steps 25
 ```
+
+Select at least one supported task from each service. Rerunning the command with the same settings and output directory reuses scored episodes and retries unfinished ones. To measure how closely each checkpoint predicts the demonstrated actions, use `.venv/bin/pdm-agent score-demos --run runs/agent --manifest runs/demos/manifest.jsonl`.
+
+## Inspect an episode
+
+For the evaluation command above, the final replay agent's ride episode lives under `runs/evaluation/checkpoints/replay-udriver/episodes/v2.udriver-4/`.
+
+| File | What it tells you |
+| --- | --- |
+| `record.json` | The task, final answer, step count, reward and reason the episode ended |
+| `trace.jsonl` and numbered JPEGs | What the agent saw and which action it attempted at each step |
+| `state.json` | What the simulated service recorded, including the booking details |
+| `score.json` | The task scorer's checks for a benchmark episode |
+| `runs/evaluation/web-summary.json` | Success counts and retention comparisons across checkpoints |
 
 ## Acknowledgment
 

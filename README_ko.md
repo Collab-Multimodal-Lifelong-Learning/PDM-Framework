@@ -1,42 +1,48 @@
-# PDM-Framework 한글 요약
+# PDM-Framework 한글 안내
 
-[English README](README.md) · [실험 결과 원본](benchmarks/agent-42.json)
+[English README](README.md)
 
-PDM은 **식당 예약을 익힌 웹 에이전트가 차량 호출을 배운 뒤에도 식당을 예약할 수 있는지** 실험하는 연속학습 프레임워크입니다. 에이전트는 자연어 요청과 모의 사이트의 화면을 보고 클릭·입력 같은 행동을 하나씩 실행합니다.
+PDM-Framework는 **식당 예약을 배운 웹 에이전트가 차량 호출을 추가로 학습하고, 이전 예약 능력을 얼마나 유지하는지** 살펴보는 연속학습 프레임워크입니다. 두 모의 서비스에 자연어 요청을 보내거나, 같은 과제를 여러 체크포인트로 실행해 행동과 예약 내역을 비교할 수 있습니다.
 
-## 무엇을 확인했나
+| 서비스 | 요청 예시 | 확인할 항목 |
+| --- | --- | --- |
+| OpenDining (`opendining`) | 두 사람이 앉을 테이블을 가장 이른 시간으로 예약 | 식당·인원·예약 시간 |
+| UDriver (`udriver`) | Local Edition에서 Golden Farmer Market까지 현금 결제로 Comfort 차량 호출 | 출발지·목적지·차종·결제 수단 |
 
-학습에 쓰지 않은 요청은 생일 저녁 식당 예약과 새 경로의 차량 호출, 각 한 건입니다. 시드 42에서 각 조건에 최대 25번의 행동을 허용하고 사이트의 최종 예약 기록으로 채점했습니다.
+## 에이전트와 연속학습
 
-| 평가 조건 | 생일 저녁 예약 성공 | 새 경로 차량 호출 성공 |
-| --- | ---: | ---: |
-| 학습 전 | 0/1 | 0/1 |
-| 식당 학습 직후 (같은 가중치로 요청별 두 번 실행) | 0/2 | 0/2 |
-| 차량까지 순차 학습한 모델 | 0/1 | 1/1 |
-| 차량 학습 중 식당 행동을 다시 학습한 모델 | 0/1 | 1/1 |
+에이전트는 매번 요청, 화면, 번호가 붙은 페이지 요소와 최근 행동을 읽고 클릭이나 텍스트 입력 같은 명령 하나를 생성합니다. 브라우저가 명령을 실행하면 바뀐 화면을 보고 다음 행동을 고릅니다. [브라우저 실행 코드](pdm/browser.py)
 
-두 최종 모델 모두 **15번의 행동으로 새 경로의 차량 호출을 완료**했습니다. 생일 저녁 예약에는 모두 실패해, 이번 실험에서 메모리가 새 예약 요청의 성공률을 높였다는 근거는 얻지 못했습니다.
+PDM의 **P**는 화면과 텍스트를 읽는 사전학습 모델 Qwen2.5-VL-3B-Instruct입니다. **D**는 예약 완료를 확인한 시연 데이터로, 행동 직전의 화면과 실행한 명령을 짝지어 LoRA 어댑터를 학습합니다. **M**은 식당 행동 일부를 보관하는 메모리입니다. 같은 식당 어댑터에서 출발해 차량 행동만으로 학습하는 방법과 차량·식당 행동을 하나씩 짝지어 학습하는 방법을 비교합니다. [시연 수집](pdm/web_collect.py) · [학습 코드](pdm/web.py)
 
-학습 때 본 “첫 번째 식당을 예약해 달라”는 요청도 메모리 모델에 두 번 주었습니다. 두 번 모두 예약은 접수됐지만 요청대로 첫 번째 식당을 예약한 것은 한 번이었습니다. 다른 한 번은 두 번째 식당을 골랐습니다.
+## 실행 방법
 
-## 어떻게 학습하나
-
-- **P · 사전학습 모델**은 Qwen2.5-VL-3B-Instruct입니다. 화면·접근성 트리·요청·행동 이력을 입력으로 사용해 LoRA 어댑터가 다음 행동을 예측합니다.
-- **D · 데이터**는 완료 기록을 확인한 시연 4건입니다. 식당 예약 2건에서 행동 12개, 차량 호출 2건에서 행동 29개를 수집했습니다.
-- **M · 메모리**에는 식당 행동 8개를 보관합니다. 같은 식당 모델에서 출발해 한쪽은 차량 행동만, 다른 쪽은 차량 행동과 과거 식당 행동을 짝지어 각각 58회 갱신합니다.
-
-## 실행과 결과 확인
-
-저장소 루트에서 두 Python 환경과 Chromium을 설치한 뒤 실행합니다. 학습과 추론에는 BF16을 지원하는 CUDA GPU가 필요합니다. [설치 명령](README.md#install)
+Linux x86-64에서 Python 3.11, uv, BF16 지원 CUDA GPU를 사용합니다. 저장소 루트에서 모델 환경과 Chromium을 설치한 뒤 다음 명령을 실행합니다. [설치 명령](README.md#install)
 
 ```bash
-.venv/bin/pdm-agent collect --out runs/agent-demos
-.venv/bin/pdm-agent train --manifest runs/agent-demos/manifest.jsonl \
-  --out runs/agent-42 --passes 2 --capacity 8 --seed 42
-.venv/bin/pdm-agent evaluate --run runs/agent-42 --out runs/evaluation-42 --max-steps 25
+.venv/bin/pdm-agent collect --out runs/demos
+.venv/bin/pdm-agent train --manifest runs/demos/manifest.jsonl \
+  --out runs/agent --passes 2 --capacity 8 --seed 42
 ```
 
-과제별 성공 여부는 `runs/evaluation-42/web-summary.json`에서 확인합니다. 저장한 모델에 직접 요청하려면 `pdm-agent ask`를 사용합니다. 실행 폴더의 `trace.jsonl`에는 모델이 수행한 행동이, `state.json`에는 사이트의 최종 상태가 기록됩니다. [저장한 모델로 식당 예약하기](README.md#run-an-instruction)
+**직접 요청하기.** `ask`는 저장한 어댑터로 새 브라우저를 엽니다. 사이트와 요청을 바꿔 실행할 때는 새 출력 폴더를 지정합니다.
+
+```bash
+.venv/bin/pdm-agent ask --checkpoint runs/agent/replay-udriver.safetensors \
+  --site udriver --out runs/my-ride \
+  --goal "Book a Comfort ride from Local Edition to Golden Farmer Market and pay with cash."
+```
+
+**공통 과제로 비교하기.** `evaluate`는 학습 전후의 체크포인트에 동일한 식당·차량 과제를 주고, 사이트 기록과 에이전트의 답변을 과제별 기준으로 채점합니다.
+
+```bash
+.venv/bin/pdm-agent evaluate --run runs/agent --out runs/evaluation \
+  --tasks v2.opendining-5 v2.udriver-4 --max-steps 25
+```
+
+## 실행 기록 읽기
+
+직접 요청한 차량의 차종과 목적지는 `runs/my-ride/state.json`에서 확인합니다. 선택 과정을 살펴보려면 같은 폴더의 `trace.jsonl`에서 해당 행동을 찾아 그 단계의 화면과 함께 읽으면 됩니다. 공통 과제의 서비스별 성공 횟수와 식당 예약 능력의 변화는 `runs/evaluation/web-summary.json`에 기록됩니다. [과제별 파일 안내](README.md#inspect-an-episode)
 
 ## Acknowledgment
 
