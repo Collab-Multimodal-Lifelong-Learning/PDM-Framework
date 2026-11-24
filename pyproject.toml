@@ -1,17 +1,16 @@
 [project]
 name = "pdm-framework"
 version = "0.1.0"
-description = "Continual multimodal learning for web actions and video question answering"
+description = "Continual learning for a multimodal browser agent"
 requires-python = ">=3.11,<3.12"
-dependencies = ["av==15.1.0", "pillow>=10,<14", "numpy>=1.26,<3", "safetensors>=0.5,<0.8"]
+dependencies = ["pillow>=10,<14", "numpy>=1.26,<3", "safetensors>=0.5,<0.8"]
 
 [project.optional-dependencies]
 cpu = ["torch==2.7.1"]
 gpu = ["torch==2.7.1", "torchvision==0.22.1", "transformers==4.52.4", "peft==0.15.2", "accelerate==1.7.0"]
 
 [project.scripts]
-pdm-web = "pdm.web:main"
-pdm-videoqa = "pdm.__main__:main"
+pdm-agent = "pdm.web:main"
 
 [dependency-groups]
 dev = ["pytest>=8,<9"]
@@ -43,9 +42,3 @@ explicit = true
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
-
-[tool.setuptools.package-data]
-pdm = ["configs/*.json"]
-
-[tool.setuptools.data-files]
-"share/pdm-framework/licenses/vlm-rlaif" = ["third_party/vlm-rlaif/LICENSE"]

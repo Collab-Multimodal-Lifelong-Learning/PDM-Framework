@@ -3,16 +3,18 @@
 import fcntl
 import hashlib
 import json
+import math
+import os
+import signal
 import shutil
 import subprocess
-import traceback
 from pathlib import Path
-from urllib.parse import urlsplit
+from .common import QWEN_MODEL, QWEN_REVISION, _atomic_path
 
 SITES = ("opendining", "udriver")
 DEFAULT_TASKS = ("v2.opendining-5", "v2.udriver-4")
 CHECKPOINTS = ("frozen", "sequential-opendining", "sequential-udriver", "replay-opendining", "replay-udriver")
-MODEL_NAME = "Qwen/Qwen2.5-VL-3B-Instruct"
+EPISODE_TIMEOUT = 240
 # Possible, script-scored tasks in the REAL v2 catalogue packaged with agisdk 0.3.5.
 _OFFICIAL_IDS = {
     f"v2.{site}-{number}": site
@@ -30,9 +32,9 @@ _FINISHED = {"success", "fail"}
 
 
 def _save(path, data):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    with _atomic_path(path) as temporary:
+        temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False) + "\n",
+                             encoding="utf-8")
 
 
 def _bind(path, desired):
@@ -44,29 +46,33 @@ def _bind(path, desired):
         _save(path, desired)
 
 
-def _read_episode(out, name, task, missing_reason):
-    location = Path("real-eval", name, "episodes", task, "record.json")
+def _read_episode(out, name, task):
+    location = Path("checkpoints", name, "episodes", task, "record.json")
     site = _OFFICIAL_IDS[task]
-    episode = dict(task_id=task, site=site, record=str(location), status="missing",
-                   reward=None, error=missing_reason)
-    try:
-        record = json.loads((out / location).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return episode
-    except (OSError, ValueError) as exc:
-        return dict(episode, status="error", error=f"Cannot read episode record: {exc}")
-    # One OpenDining task was published on the stable replica. All others use versioned replicas.
-    official_url = "https://real-opendining.vercel.app" if task == "v2.opendining-17" else _SITE_URLS[site]
-    if (not isinstance(record, dict) or record.get("task_id") != task or record.get("site") != site
-            or record.get("kind") != "real" or record.get("version") != "v2"
-            or record.get("llm_judged") is not False or record.get("url_override")
-            or record.get("start_url", "").rstrip("/") != official_url.rstrip("/")):
-        raise ValueError(f"Record does not match its official REAL v2 task: {out / location}")
-    status = record.get("status")
-    if status not in _FINISHED | {"error", "skipped"}:
-        raise ValueError(f"Unknown REAL-Eval status {status!r} in {out / location}")
-    return {**episode, "status": status, "reward": record["reward"] if status in _FINISHED else None,
-            **{key: record.get(key) for key in ("steps", "end", "elapsed", "error", "goal", "start_url")}}
+    path = out / location
+    if not path.exists():
+        return dict(task_id=task, site=site, record=str(location), status="missing", reward=None,
+                    error="Evaluation interrupted before the episode was recorded.")
+    row = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(row, dict) or row.get("task_id") != task or row.get("site") != site:
+        raise ValueError(f"Record does not match the official task at {path}")
+    status = row.get("status")
+    if status in _FINISHED:
+        official_url = "https://real-opendining.vercel.app" if task == "v2.opendining-17" else _SITE_URLS[site]
+        if (row.get("start_url") or "").rstrip("/") != official_url.rstrip("/"):
+            raise ValueError(f"Record does not match the official task URL at {path}")
+        reward = row.get("reward")
+        if type(reward) not in (int, float) or not math.isfinite(reward):
+            raise ValueError(f"Invalid scored reward at {path}")
+        if type(row.get("steps")) is not int or row["steps"] < 0 or not row.get("end"):
+            raise ValueError(f"Missing episode outcome at {path}")
+        env = row.get("environment")
+        if not isinstance(env, dict) or env.get("agisdk") != "0.3.5":
+            raise ValueError(f"Unexpected browser runtime at {path}")
+        _bind(out / "browser-runtime.json", env)
+    elif status not in {"missing", "error", "skipped"} or row.get("reward") is not None:
+        raise ValueError(f"Invalid episode outcome at {path}")
+    return dict(row, record=str(location))
 
 
 def summarize(episodes, tasks):
@@ -108,41 +114,52 @@ def summarize(episodes, tasks):
                 infrastructure_errors=errors, episodes=episodes)
 
 
-def _invoke(folder, executable, config, tasks, checkpoint, serve_checkpoint):
-    """Leave endpoint startup failures and CLI exits visible even without a REAL record."""
-    returncode = None
-    reason = "Harness exited without an episode record. See harness.log."
-    try:
-        with serve_checkpoint(checkpoint) as endpoint:
-            url = urlsplit(endpoint)
-            if url.scheme != "http" or url.hostname not in {"localhost", "127.0.0.1", "::1"}:
-                raise ValueError("The browser policy endpoint must be local HTTP.")
-            _save(folder / "pdm-config.json", config)
-            command = [executable, "run", "--version", "v2", "--task", *tasks, "--config",
-                       str(folder / "pdm-config.json"), "--base-url", endpoint, "--results-dir",
-                       str(folder.parent), "--name", folder.name]
-            with (folder / "harness.log").open("a", encoding="utf-8") as log:
-                returncode = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False).returncode
-            if returncode:
-                reason = f"REAL-Eval exited with code {returncode}. See harness.log."
-    except Exception as exc:
-        reason = f"{type(exc).__name__}: {exc}"
-        with (folder / "harness.log").open("a", encoding="utf-8") as log:
-            traceback.print_exc(file=log)
-    _save(folder / "pdm-invocation.json", dict(returncode=returncode, missing_reason=reason))
+def _error(folder, task, reason):
+    _save(folder / "record.json", dict(task_id=task, site=_OFFICIAL_IDS[task], status="error",
+                                       reward=None, steps=None, end="error", error=reason))
 
 
-def evaluate(out, real_eval, checkpoints, serve_checkpoint, max_steps=25, *, tasks=DEFAULT_TASKS,
-             model_name=MODEL_NAME, task_timeout=240, max_tokens=128, seed=42):
-    """Run matched browser episodes. serve_checkpoint(path_or_None) yields a local /v1 URL.
+def _run_episode(executable, endpoint, task, folder, max_steps):
+    command = [executable, "-m", "pdm.browser_cli", "episode", "--task", task, "--out", str(folder),
+               "--endpoint", endpoint, "--max-steps", str(max_steps)]
+    with (folder / "episode.log").open("a", encoding="utf-8") as log:
+        # Use this checkout's policy code even when the browser interpreter lives in a separate venv.
+        process = subprocess.Popen(command, cwd=Path(__file__).resolve().parent.parent, stdout=log,
+                                   stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            code = process.wait(timeout=EPISODE_TIMEOUT)
+        except BaseException:
+            # Chromium and Playwright are descendants of the worker; reap the entire episode on timeout.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise
+    path = folder / "record.json"
+    if code and path.exists():
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if record.get("status") in {"error", "skipped"}:
+            return
+    if code or not path.exists():
+        _error(folder, task, f"Browser worker exited with code {code} without a valid outcome. See episode.log.")
 
-    A repeated call may add checkpoints, or retry unavailable episodes with the same
-    inputs. Each official harness run retains its original records, traces and screenshots.
-    """
+
+def _prepare_retry(folder):
+    # Keep evidence from earlier attempts, and never mistake it for output from a new worker.
+    if folder.exists():
+        archive = folder.parent.parent / "attempts" / folder.name
+        archive.mkdir(parents=True, exist_ok=True)
+        index = 1
+        while (archive / str(index)).exists():
+            index += 1
+        folder.rename(archive / str(index))
+    folder.mkdir(parents=True)
+
+
+def evaluate(out, browser_python, checkpoints, serve_checkpoint, max_steps=25, *, tasks=DEFAULT_TASKS):
+    """Evaluate matched official tasks, retrying only episodes without a score."""
     out = Path(out).resolve()
-    executable = shutil.which(str(real_eval))
-    if executable is None:
-        raise FileNotFoundError(f"Cannot find the REAL-Eval executable: {real_eval}")
     tasks = tuple(task if task.startswith("v2.") else f"v2.{task}" for task in tasks)
     if (len(tasks) != len(set(tasks)) or any(task not in _OFFICIAL_IDS for task in tasks)
             or {_OFFICIAL_IDS[task] for task in tasks} != set(SITES)):
@@ -151,53 +168,54 @@ def evaluate(out, real_eval, checkpoints, serve_checkpoint, max_steps=25, *, tas
         raise ValueError(f"Expected checkpoint names from {CHECKPOINTS}")
     if any((name == "frozen") != (checkpoint is None) for name, checkpoint in checkpoints.items()):
         raise ValueError("Use None for frozen and a saved adapter path for each trained checkpoint.")
-    if min(max_steps, max_tokens, task_timeout) < 1:
-        raise ValueError("Step, token and timeout budgets must be positive.")
-    config = {
-        "model": dict(name=model_name, temperature=0.0, top_p=None, top_k=None, enable_thinking=None,
-                      max_tokens=max_tokens, seed=seed),
-        "agent": dict(prompt_style="basic", use_screenshot=True, axtree_max_chars=6000,
-                      jpeg_quality=75, parse_retries=0, site_guides={}, task_hints={}, agentlab_hint_sites=[],
-                      system_prompt_extra="Return only one browser action in a fenced action block."),
-        "browser": dict(max_steps=max_steps, headless=True, record_video=False, width=1280, height=720),
-        "run": dict(workers=1, task_timeout=task_timeout, site_url_overrides={}),
-    }
-    executable = str(Path(executable).resolve())
-    protocol = dict(version="v2", sdk="agisdk==0.3.5", executable=executable, tasks=list(tasks), config=config)
+    if type(max_steps) is not int or max_steps < 1:
+        raise ValueError("max_steps must be a positive integer")
+    executable = shutil.which(str(browser_python))
+    if executable is None:
+        raise FileNotFoundError(f"Cannot find browser Python interpreter: {browser_python}")
+    # Keep the venv's path intact. Resolving the executable symlink would select the base installation.
+    executable = os.path.abspath(executable)
+    root = Path(__file__).parent
+    source_files = ("browser.py", "browser_cli.py", "web_model.py", "web_eval.py")
+    protocol = dict(version="v2", sdk="agisdk==0.3.5", browser_python=executable, tasks=list(tasks),
+                    model=QWEN_MODEL, revision=QWEN_REVISION, decoding="greedy", max_steps=max_steps,
+                    task_timeout_seconds=EPISODE_TIMEOUT,
+                    source_sha256={file: hashlib.sha256((root / file).read_bytes()).hexdigest()
+                                   for file in source_files})
     out.mkdir(parents=True, exist_ok=True)
     with (out / ".evaluation.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        root = out / "real-eval"
         _bind(out / "web-protocol.json", protocol)
         for name, checkpoint in checkpoints.items():
-            folder = root / name
-            folder.mkdir(parents=True, exist_ok=True)
+            folder = out / "checkpoints" / name
             digest = None
             if checkpoint is not None:
                 with Path(checkpoint).open("rb") as weights:
                     digest = hashlib.file_digest(weights, "sha256").hexdigest()
             _bind(folder / "pdm-checkpoint.json", dict(name=name, sha256=digest))
-            rows = [_read_episode(out, name, task, "No episode record yet") for task in tasks]
-            if all(row["status"] in _FINISHED for row in rows):
+            pending = [task for task in tasks if _read_episode(out, name, task)["status"] not in _FINISHED]
+            if not pending:
                 continue
-            _invoke(folder, executable, config, tasks, checkpoint, serve_checkpoint)
-        episodes = {}
-        environments = {}
-        for name in CHECKPOINTS:
-            folder = root / name
-            if (folder / "pdm-checkpoint.json").exists():
-                info_path = folder / "run.json"
-                if info_path.exists():
-                    env = json.loads(info_path.read_text(encoding="utf-8"))["environment"]
-                    if env.get("agisdk") != "0.3.5":
-                        raise ValueError(f"Unexpected REAL SDK version in {info_path}")
-                    if environments and env != next(iter(environments.values())):
-                        raise ValueError(f"REAL-Eval runtime differs across checkpoints in {info_path}")
-                    environments[name] = env
-                invocation = folder / "pdm-invocation.json"
-                reason = (json.loads(invocation.read_text())["missing_reason"] if invocation.exists()
-                          else "Evaluation interrupted before the harness finished.")
-                episodes[name] = [_read_episode(out, name, task, reason) for task in tasks]
-        result = dict(protocol=protocol, environments=environments, **summarize(episodes, tasks))
+            for task in pending:
+                _prepare_retry(folder / "episodes" / task)
+            try:
+                with serve_checkpoint(checkpoint) as endpoint:
+                    for task in pending:
+                        episode = folder / "episodes" / task
+                        try:
+                            _run_episode(executable, endpoint, task, episode, max_steps)
+                        except subprocess.TimeoutExpired:
+                            _error(episode, task, f"Episode timeout after {EPISODE_TIMEOUT} seconds. See episode.log.")
+                        except (OSError, ValueError) as exc:
+                            _error(episode, task, f"{type(exc).__name__}: {exc}")
+            except Exception as exc:
+                for task in pending:
+                    episode = folder / "episodes" / task
+                    if not (episode / "record.json").exists():
+                        _error(episode, task, f"{type(exc).__name__}: {exc}")
+
+        episodes = {name: [_read_episode(out, name, task) for task in tasks] for name in CHECKPOINTS
+                    if (out / "checkpoints" / name / "pdm-checkpoint.json").exists()}
+        result = dict(protocol=protocol, **summarize(episodes, tasks))
         _save(out / "web-summary.json", result)
         return result

@@ -1,0 +1,188 @@
+{
+  "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "model_revision": "66285546d2b821cf421d4f5eb2576359d3770cd3",
+  "date": "2026-11-24",
+  "training": {
+    "seed": 42,
+    "passes": 2,
+    "verified_demonstrations": 4,
+    "actions_by_service": {
+      "opendining": 12,
+      "udriver": 29
+    },
+    "memory_capacity": 8,
+    "updates": {
+      "sequential-opendining": 24,
+      "sequential-udriver": 58,
+      "replay-udriver": 58
+    },
+    "manifest_sha256": "8c686d8dcabd1ff613f0e83a18dcac084c5a9f1c75ad6942728a8336796544c7",
+    "checkpoint_sha256": {
+      "sequential-opendining.safetensors": "cda9d4f43e753e22900e998484a08c6fbb4bc1b28ba319690c830c1806bcc04e",
+      "sequential-udriver.safetensors": "fcdb62cc20ba4e59a2af92e77e65996b09f3b60fdaf4454964a81624347e6bc8",
+      "replay-udriver.safetensors": "012179a1d8c7f644cb9a8b0412e3b2febc6b4c9458eb8d2e4f4f74fc4d862021"
+    }
+  },
+  "action_loss_on_training_demonstrations": {
+    "frozen": {
+      "opendining": 1.1789012899001439,
+      "udriver": 1.338771002045993
+    },
+    "sequential-opendining": {
+      "opendining": 0.28585100825876,
+      "udriver": 0.4538675798424359
+    },
+    "replay-opendining": {
+      "opendining": 0.28585100825876,
+      "udriver": 0.4538675798424359
+    },
+    "sequential-udriver": {
+      "opendining": 0.17699629425381622,
+      "udriver": 0.1198362204695827
+    },
+    "replay-udriver": {
+      "opendining": 0.1222891787183471,
+      "udriver": 0.13555219083831743
+    }
+  },
+  "evaluation_protocol": {
+    "version": "v2",
+    "sdk": "agisdk==0.3.5",
+    "tasks": [
+      "v2.opendining-5",
+      "v2.udriver-4"
+    ],
+    "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+    "revision": "66285546d2b821cf421d4f5eb2576359d3770cd3",
+    "decoding": "greedy",
+    "max_steps": 25,
+    "task_timeout_seconds": 240,
+    "source_sha256": {
+      "browser.py": "2b108cac1973a20066ca61342ccc3354d0bf496cd528b01edd2c25f0e47e55a7",
+      "browser_cli.py": "3dfe1a57575755fa92b9aa03cdb3d232d50a762095e84184b474ca982c309508",
+      "web_model.py": "3d9bb31d1ea62a5d6c806adc2d2af4a3cb70a873a9e7822fc62e5fb570434b6d",
+      "web_eval.py": "d075b9ff0221d2042bd0542040eef840151235d54a5998001aef76bafb4d8c6f"
+    }
+  },
+  "browser_environment": {
+    "python": "3.11.15",
+    "agisdk": "0.3.5",
+    "gymnasium": "1.4.0",
+    "playwright": "1.64.1"
+  },
+  "official_episodes": [
+    {
+      "checkpoint": "frozen",
+      "task_id": "v2.opendining-5",
+      "status": "fail",
+      "reward": 0.0,
+      "steps": 25,
+      "end": "max_steps"
+    },
+    {
+      "checkpoint": "frozen",
+      "task_id": "v2.udriver-4",
+      "status": "fail",
+      "reward": 0.0,
+      "steps": 25,
+      "end": "max_steps"
+    },
+    {
+      "checkpoint": "sequential-opendining",
+      "task_id": "v2.opendining-5",
+      "status": "fail",
+      "reward": 0.0,
+      "steps": 25,
+      "end": "max_steps"
+    },
+    {
+      "checkpoint": "sequential-opendining",
+      "task_id": "v2.udriver-4",
+      "status": "fail",
+      "reward": 0.0,
+      "steps": 25,
+      "end": "max_steps"
+    },
+    {
+      "checkpoint": "sequential-udriver",
+      "task_id": "v2.opendining-5",
+      "status": "fail",
+      "reward": 0.0,
+      "steps": 9,
+      "end": "answered"
+    },
+    {
+      "checkpoint": "sequential-udriver",
+      "task_id": "v2.udriver-4",
+      "status": "success",
+      "reward": 1.0,
+      "steps": 15,
+      "end": "answered"
+    },
+    {
+      "checkpoint": "replay-opendining",
+      "task_id": "v2.opendining-5",
+      "status": "fail",
+      "reward": 0.0,
+      "steps": 25,
+      "end": "max_steps"
+    },
+    {
+      "checkpoint": "replay-opendining",
+      "task_id": "v2.udriver-4",
+      "status": "fail",
+      "reward": 0.0,
+      "steps": 25,
+      "end": "max_steps"
+    },
+    {
+      "checkpoint": "replay-udriver",
+      "task_id": "v2.opendining-5",
+      "status": "fail",
+      "reward": 0.0,
+      "steps": 15,
+      "end": "answered"
+    },
+    {
+      "checkpoint": "replay-udriver",
+      "task_id": "v2.udriver-4",
+      "status": "success",
+      "reward": 1.0,
+      "steps": 15,
+      "end": "answered"
+    }
+  ],
+  "infrastructure_errors": 0,
+  "practice": {
+    "instruction": "Repeat the first restaurant training booking for two with its first offered time.",
+    "checkpoint": "replay-udriver",
+    "fresh_browser_runs": [
+      {
+        "expected": {
+          "restaurant": "Vintage Bites",
+          "time": "12:30 PM"
+        },
+        "booked": {
+          "restaurant": "Vintage Bites",
+          "time": "12:30 PM",
+          "guests": "2 people"
+        },
+        "matches_request": true,
+        "steps": 6
+      },
+      {
+        "expected": {
+          "restaurant": "Vintage Bites",
+          "time": "12:30 PM"
+        },
+        "booked": {
+          "restaurant": "Evening Delight",
+          "time": "1:00 PM",
+          "guests": "2 people"
+        },
+        "matches_request": false,
+        "steps": 6
+      }
+    ]
+  }
+}

@@ -1,4 +1,4 @@
-"""Train and serve PDM browser-action adapters, and score them in REAL-Eval."""
+"""Train, serve and evaluate continual browser agents."""
 import argparse
 import base64
 import hashlib
@@ -6,6 +6,7 @@ import io
 import json
 import math
 import random
+import subprocess
 import sys
 import threading
 from collections import Counter
@@ -15,9 +16,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .data import _atomic_path
-from .models import QWEN_MODEL, QWEN_REVISION
-from .stream import reservoir_slot
+from .common import QWEN_MODEL, QWEN_REVISION, _atomic_path, reservoir_slot
 
 DOMAINS = ("opendining", "udriver")
 
@@ -231,6 +230,8 @@ def score_demos(run, manifest, policy_factory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    collect = sub.add_parser("collect", help="collect verified browser demonstrations")
+    collect.add_argument("--out", required=True, type=Path)
     tr = sub.add_parser("train")
     tr.add_argument("--manifest", required=True, type=Path)
     tr.add_argument("--out", required=True, type=Path)
@@ -239,7 +240,6 @@ def main():
     tr.add_argument("--seed", type=int, default=42)
     evaluation = sub.add_parser("evaluate")
     evaluation.add_argument("--run", required=True, type=Path)
-    evaluation.add_argument("--real-eval", default="real-eval")
     evaluation.add_argument("--out", required=True, type=Path)
     evaluation.add_argument("--max-steps", type=int, default=25)
     evaluation.add_argument("--tasks", nargs="+", help="held-out official v2 tasks across both sites")
@@ -249,11 +249,23 @@ def main():
     serve = sub.add_parser("serve")
     serve.add_argument("--port", type=int, default=8017)
     serve.add_argument("--checkpoint", type=Path, help="saved action adapter (omit for the frozen baseline)")
-    for cmd in (tr, evaluation, fit, serve):
+    ask = sub.add_parser("ask", help="run an instruction with a saved adapter in a fresh browser")
+    ask.add_argument("--checkpoint", required=True, type=Path)
+    ask.add_argument("--site", choices=DOMAINS, required=True)
+    ask.add_argument("--goal", required=True)
+    ask.add_argument("--out", required=True, type=Path)
+    ask.add_argument("--max-steps", type=int, default=25)
+    for cmd in (collect, evaluation, ask):
+        cmd.add_argument("--browser-python", default="browser-env/.venv/bin/python",
+                         help="Python interpreter with the browser dependencies installed")
+    for cmd in (tr, evaluation, fit, serve, ask):
         cmd.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
-    from .web_model import WebPolicy
     try:
+        if args.command == "collect":
+            return subprocess.run([args.browser_python, "-m", "pdm.web_collect",
+                                   "--output", str(args.out)], check=False).returncode
+        from .web_model import WebPolicy
         if args.command == "train":
             train(args.manifest, args.out, lambda: WebPolicy(args.device, seed=args.seed),
                   seed=args.seed, passes=args.passes, capacity=args.capacity)
@@ -273,6 +285,12 @@ def main():
             with serve_policy(policy, getattr(args, "port", 0)) as url:
                 yield url
 
+        if args.command == "ask":
+            with serve_checkpoint(args.checkpoint) as url:
+                return subprocess.run([args.browser_python, "-m", "pdm.browser_cli", "ask",
+                                       "--endpoint", url, "--site", args.site, "--goal", args.goal,
+                                       "--out", str(args.out), "--max-steps", str(args.max_steps)],
+                                      check=False).returncode
         if args.command == "serve":
             with serve_checkpoint(args.checkpoint) as url:
                 print(f"Serving {QWEN_MODEL} at {url}", flush=True)
@@ -280,14 +298,14 @@ def main():
         else:
             from .web_eval import evaluate
             kwargs = {"tasks": args.tasks} if args.tasks else {}
-            result = evaluate(args.out, args.real_eval, checkpoints_from(args.run), serve_checkpoint, args.max_steps, **kwargs)
+            result = evaluate(args.out, args.browser_python, checkpoints_from(args.run), serve_checkpoint, args.max_steps, **kwargs)
             print(args.out / "web-summary.json")
             if result["infrastructure_errors"]:
                 print("Some episodes were unavailable. Rerun with the same output directory to retry.", file=sys.stderr)
                 return 2
         return 0
     except (OSError, ValueError, RuntimeError) as exc:
-        print(f"pdm-web: {exc}", file=sys.stderr)
+        print(f"pdm-agent: {exc}", file=sys.stderr)
         return 1
 
 

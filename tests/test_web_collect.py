@@ -40,3 +40,16 @@ def test_reservation_requires_matching_party_time_and_contact():
         wrong["finalstate"]["booking"]["bookingDetails"][0].update(change)
         with pytest.raises(ValueError, match="No matching completed booking"):
             verify_state(task, wrong, chosen)
+
+
+def test_failed_demonstration_leaves_no_partial_collection(tmp_path, monkeypatch):
+    from pdm import web_collect
+
+    def fail(task, out):
+        (out / "partial.jpg").write_bytes(b"partial")
+        raise RuntimeError("replica unavailable")
+
+    monkeypatch.setattr(web_collect, "collect_episode", fail)
+    with pytest.raises(RuntimeError, match="replica unavailable"):
+        web_collect.collect(tmp_path / "examples")
+    assert list(tmp_path.iterdir()) == []

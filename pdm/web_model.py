@@ -1,5 +1,6 @@
 """Generative browser-action policy using the pinned Qwen visual language model."""
 
+import hashlib
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -8,8 +9,40 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from torch.nn import functional as F
 
-from .experiment import fingerprint, trainable_state
-from .models import MAX_PIXELS, QWEN_MODEL, QWEN_REVISION, build_model
+from .common import QWEN_MODEL, QWEN_REVISION
+
+MAX_PIXELS = 256 * 28 * 28
+
+
+def build_policy(device, seed):
+    if device.type != "cuda" or not torch.cuda.is_available():
+        raise ValueError("Browser policy requires a CUDA GPU with native BF16 support")
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+
+    with torch.cuda.device(device), torch.random.fork_rng(devices=[device]):
+        if not torch.cuda.is_bf16_supported(including_emulation=False):
+            raise ValueError(f"The selected device {device} does not support native BF16")
+        torch.random.default_generator.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        processor = AutoProcessor.from_pretrained(QWEN_MODEL, revision=QWEN_REVISION, use_fast=False)
+        base = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            QWEN_MODEL, revision=QWEN_REVISION, torch_dtype=torch.bfloat16,
+            device_map={"": device}, attn_implementation="sdpa",
+        )
+        adapter = LoraConfig(
+            r=8, lora_alpha=16, lora_dropout=0.0, bias="none",
+            target_modules=r"model\.language_model\.layers\.\d+\.self_attn\.(q_proj|v_proj)",
+        )
+        return processor, get_peft_model(base, adapter)
+
+
+def fingerprint(tensors):
+    digest = hashlib.sha256()
+    for name, tensor in sorted(tensors.items()):
+        digest.update(name.encode())
+        digest.update(tensor.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
 
 
 class WebPolicy:
@@ -17,9 +50,7 @@ class WebPolicy:
 
     def __init__(self, device, *, seed=42, lr=1e-4):
         self.device = torch.device(device)
-        model = build_model("nextqa", seed=seed, device=self.device)
-        self.processor = model.processor
-        self.backbone = model.backbone
+        self.processor, self.backbone = build_policy(self.device, seed)
         self.optimizer = torch.optim.AdamW(
             (p for p in self.backbone.parameters() if p.requires_grad), lr=lr, weight_decay=0.0
         )
@@ -116,7 +147,8 @@ class WebPolicy:
         """Atomically write a safetensors adapter snapshot suitable for inference."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tensors = trainable_state(self.backbone)
+        tensors = {name: p.detach().cpu().contiguous()
+                   for name, p in self.backbone.named_parameters() if p.requires_grad}
         metadata = dict(self._metadata(), adapter_sha256=fingerprint(tensors))
         with NamedTemporaryFile(dir=path.parent, delete=False) as tmp:
             temp_path = Path(tmp.name)

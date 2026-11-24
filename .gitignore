@@ -16,12 +16,8 @@ __pycache__/
 build/
 dist/
 
-# Generated videos, model checkpoints, metrics, and HTML reports
+# Local runs, cached weights and browser traces
 runs/
 /outputs/
-
-# Local NExT-QA media and model downloads
-/data/nextqa/
-/nextqa/
 /.cache/
 *.safetensors

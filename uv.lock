@@ -31,16 +31,6 @@ wheels = [
 ]
 
 [[package]]
-name = "av"
-version = "15.1.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e9/c3/83e6e73d1592bc54436eae0bc61704ae0cff0c3cfbde7b58af9ed67ebb49/av-15.1.0.tar.gz", hash = "sha256:39cda2dc810e11c1938f8cb5759c41d6b630550236b3365790e67a313660ec85", size = 3774192, upload-time = "2025-08-30T04:41:56.076Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/5e/95/31b7fb34f9fea7c7389240364194f4f56ad2d460095038cc720f50a90bb3/av-15.1.0-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:c8ef597087db560514617143532b1fafc4825ebb2dda9a22418f548b113a0cc7", size = 39571086, upload-time = "2025-08-30T04:39:47.109Z" },
-    { url = "https://files.pythonhosted.org/packages/aa/04/038b94bc9a1ee10a451c867d4a2fc91e845f83bfc2dae9df25893abcb57f/av-15.1.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:d3f66ff200ea166e606cb3c5cb1bd2fc714effbec2e262a5d67ce60450c8234a", size = 40878695, upload-time = "2025-08-30T04:39:54.493Z" },
-]
-
-[[package]]
 name = "certifi"
 version = "2026.11.20"
 source = { registry = "https://pypi.org/simple" }
@@ -318,7 +308,6 @@ name = "pdm-framework"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "av", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-13-pdm-framework-cpu' and extra == 'extra-13-pdm-framework-gpu') or (sys_platform != 'linux' and extra == 'extra-13-pdm-framework-cpu' and extra == 'extra-13-pdm-framework-gpu')" },
     { name = "numpy", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-13-pdm-framework-cpu' and extra == 'extra-13-pdm-framework-gpu') or (sys_platform != 'linux' and extra == 'extra-13-pdm-framework-cpu' and extra == 'extra-13-pdm-framework-gpu')" },
     { name = "pillow", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-13-pdm-framework-cpu' and extra == 'extra-13-pdm-framework-gpu') or (sys_platform != 'linux' and extra == 'extra-13-pdm-framework-cpu' and extra == 'extra-13-pdm-framework-gpu')" },
     { name = "safetensors", marker = "(platform_machine == 'x86_64' and sys_platform == 'linux') or (platform_machine != 'x86_64' and extra == 'extra-13-pdm-framework-cpu' and extra == 'extra-13-pdm-framework-gpu') or (sys_platform != 'linux' and extra == 'extra-13-pdm-framework-cpu' and extra == 'extra-13-pdm-framework-gpu')" },
@@ -344,7 +333,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'gpu'", specifier = "==1.7.0" },
-    { name = "av", specifier = "==15.1.0" },
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "peft", marker = "extra == 'gpu'", specifier = "==0.15.2" },
     { name = "pillow", specifier = ">=10,<14" },

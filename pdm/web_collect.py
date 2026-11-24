@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from urllib.parse import urlsplit
+from .browser import PRACTICE_URLS, SYSTEM, TREE_LIMIT, make_env, page_view, parse_action, practice_state
 
 
 @dataclass(frozen=True)
@@ -69,6 +69,10 @@ def restaurant_actions(task, chosen):
     chosen["time"] = re.search(r"link 'Book for ([^']+)'", card).group(1)
     tree = yield click(card, "link 'Book for ")
     field = r"textbox '' value='\+1'"
+    for _ in range(3):
+        if re.search(field, tree):
+            break
+        tree = yield "noop(1000)"
     tree = yield fill(tree, field, "4155550146")
     tree = yield fill(tree, "textbox 'Email address'", "diner@example.com")
     if "value='diner@example.com'" not in tree:
@@ -149,18 +153,9 @@ def verify_state(task, state, chosen):
 
 
 def collect_episode(task, path):
-    from realeval.agent import LocalAgent
-    from realeval.config import AgentConfig, ModelConfig
-    from realeval.tasks import REAL_SITES, RealEvalEnvArgs
-
-    config = AgentConfig(prompt_style="basic", axtree_max_chars=6000, parse_retries=0,
-                         system_prompt_extra="Return only one browser action in a fenced action block.")
-    agent = LocalAgent(ModelConfig(), config, max_steps=25)
-    spec = dict(kind="custom", start_url=REAL_SITES[task.domain], goal=task.goal)
-    env = RealEvalEnvArgs(
-        task_name=task.episode, task_seed=0, max_steps=25, headless=True, slow_mo=0,
-        viewport={"width": 1280, "height": 720}, task_spec=spec,
-    ).make_env(agent.action_set.to_python_code, str(path))
+    start_url = PRACTICE_URLS[task.domain]
+    env = make_env(task.episode, task.goal, task.domain)
+    history = []
     chosen = {}
     teacher = restaurant_actions(task, chosen) if task.domain == "opendining" else ride_actions(task)
     next(teacher)
@@ -168,38 +163,33 @@ def collect_episode(task, path):
     try:
         raw, _ = env.reset(seed=0)
         for step in range(1, 26):
-            observation = agent.obs_preprocessor(raw)
-            if urlsplit(observation["url"]).netloc != urlsplit(spec["start_url"]).netloc:
-                raise ValueError("Browser left the practice replica")
-            messages = agent._build_messages(observation, step, config.axtree_max_chars)
-            tree = observation["axtree_txt"]
-            action = teacher.send(tree)
+            tree, prompt, image = page_view(raw, history, start_url)
+            action = parse_action(teacher.send(tree))
             print(f"{task.episode} {step}: {action}", flush=True)
             target = re.match(r"(?:click|fill)\('(\w+)'", action)
-            if target and f"[{target[1]}]" not in tree[:config.axtree_max_chars]:
+            if target and f"[{target[1]}]" not in tree[:TREE_LIMIT]:
                 raise ValueError(f"Action target missing from the model's current observation: {action}")
             image_name = f"{task.episode}/{step:02}.jpg"
-            (path / image_name).write_bytes(observation["screenshot_jpeg"])
+            (path / image_name).write_bytes(image)
             rows.append({
                 "episode": task.episode, "domain": task.domain, "split": "train",
-                "system": messages[0]["content"],
-                "prompt": "\n\n".join(part["text"] for part in messages[1]["content"] if part["type"] == "text"),
+                "system": SYSTEM,
+                "prompt": prompt,
                 "image": image_name, "action": f"```action\n{action}\n```",
             })
-            raw, _, done, truncated, info = env.step(action)
+            raw, _, done, truncated, _ = env.step(action)
             if raw["last_action_error"]:
                 raise ValueError(raw["last_action_error"])
-            if done or truncated:
-                if not done or not action.startswith("send_msg_to_user("):
+            if action.startswith("send_msg_to_user(") or done or truncated:
+                if not action.startswith("send_msg_to_user("):
                     raise ValueError(f"Episode ended before confirmation ({step} steps)")
-                state = info["task_info"]["env_state"]
+                state = practice_state(env)
                 evidence = verify_state(task, state, chosen)
                 (path / task.episode / "outcome.json").write_text(json.dumps(
-                    dict(episode=task.episode, goal=task.goal, url=spec["start_url"], verified=evidence),
+                    dict(episode=task.episode, goal=task.goal, url=start_url, verified=evidence),
                     indent=2, ensure_ascii=False))
                 return rows
-            # REAL's basic prompt includes only the sequence of canonical action strings.
-            agent.history.append({"action": action})
+            history.append(action)
         raise ValueError("Episode exceeded the step budget")
     finally:
         env.close()
@@ -225,7 +215,7 @@ def collect(output, tasks=TASKS):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=Path("runs/web-training-demo"))
+    parser.add_argument("--output", type=Path, default=Path("runs/agent-demos"))
     args = parser.parse_args()
     collect(args.output)
 

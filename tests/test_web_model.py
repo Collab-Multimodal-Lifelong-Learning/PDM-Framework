@@ -37,15 +37,15 @@ class Backbone(nn.Module):
 
 @pytest.fixture
 def policy(monkeypatch):
-    def build(profile, seed, device):
+    def build(device, seed):
         with torch.random.fork_rng(devices=[]):
             torch.random.default_generator.manual_seed(seed)
             model = Backbone()
         tokenizer = SimpleNamespace(eos_token_id=7, encode=lambda text, **kw: [int(i) for i in text],
                                     decode=lambda ids, **kw: ''.join(str(int(i)) for i in ids if i != 7))
-        return SimpleNamespace(processor=SimpleNamespace(tokenizer=tokenizer), backbone=model)
+        return SimpleNamespace(tokenizer=tokenizer), model
 
-    monkeypatch.setattr(web_model, 'build_model', build)
+    monkeypatch.setattr(web_model, 'build_policy', build)
     monkeypatch.setattr(web_model.WebPolicy, '_inputs', lambda self, system, prompt, image: {
         'input_ids': torch.tensor([[1, 2]]), 'attention_mask': torch.ones((1, 2), dtype=torch.long)})
     return web_model.WebPolicy('cpu')
