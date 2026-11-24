@@ -64,6 +64,13 @@ def video_duration_ms(path):
     return _timeline(_file_key(path))[1]
 
 
+def random_frame_window(path, length, draw):
+    """Anchor a window to a seeded frame and keep its exact duration at the clip edge."""
+    pts, duration = _timeline(_file_key(path))
+    start = min(int(pts[draw % len(pts)]), duration - length)
+    return [start, start + length]
+
+
 def _quarters(pts, duration):
     boundaries = [k * duration // 4 for k in range(5)]
     for start, end in zip(boundaries, boundaries[1:]):

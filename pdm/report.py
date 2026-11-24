@@ -150,7 +150,7 @@ header nav{gap:12px;font-size:.88rem}.panel{padding:14px}}
 const run = JSON.parse(document.getElementById('run-data').textContent);
 const byId = id => document.getElementById(id);
 const names = new Map(Object.entries({frozen:'Frozen',retrieval:'Retrieval only',lora:'Sequential LoRA',
-  pdm:'PDM',pdm_uniform:'PDM · uniform selection',pdm_no_replay:'PDM · no replay'}));
+  stream_lora:'Online LoRA',pdm_stream:'Online PDM',pdm_evidence:'PDM · evidence window',pdm_random_window:'PDM · random window',pdm:'PDM',pdm_uniform:'PDM · uniform selection',pdm_no_replay:'PDM · no replay'}));
 const methodName = name => names.get(name) || name;
 const stageName = stage => 'Stage ' + stage;
 const pct = n => Number.isFinite(n) ? (100*n).toFixed(1)+'%' : '—';
@@ -300,7 +300,7 @@ clip.onchange = changeClip; question.onchange = changeQuestion; method.onchange 
 if (run.records.length) changeClip();
 else byId('inspector').replaceChildren(element('p','No evaluated questions in this run.'));
 
-const accuracy = [], performance = [], costs = [];
+const accuracy = [], performance = [], costs = [], training = [], online = [];
 for (const [condition, result] of Object.entries(run.metrics)) {
   result.accuracy_matrix.forEach((row,i) => accuracy.push([methodName(condition),stageName(i+1),...row.map(meter)]));
   for (const s of result.stages) {
@@ -308,7 +308,14 @@ for (const [condition, result] of Object.entries(run.metrics)) {
     performance.push([...label,meter(s.seen_average),points(s.forgetting),points(s.adaptation_gain),
       pct(s.mean_evidence_iou),s.evidence_count]);
     costs.push([...label,fmt(s.update_seconds,3),Number.isFinite(s.peak_cuda_bytes)
-      ? fmt(s.peak_cuda_bytes/1048576,2) : '—',fmt(s.mean_latency_ms,2),fmt(s.p95_latency_ms,2),s.replay_count]);
+      ? fmt(s.peak_cuda_bytes/1048576,2) : '—',fmt(s.mean_latency_ms,2),fmt(s.p95_latency_ms,2),s.replay_count,
+      s.window_extraction_count ?? '—',s.shared_training_from ? methodName(s.shared_training_from) : '—']);
+    if (s.online_updates != null) online.push([...label,s.stream_seen,s.online_updates,s.replay_count,
+      pct(s.retrieval_r1),fmt(s.retrieval_mrr,3)]);
+    for (const pass of s.training_history || []) {
+      training.push([...label,pass.pass,pass.optimizer_steps,fmt(pass.train_loss,4),
+        fmt(pass.validation_loss,4),pass.pass===s.best_pass ? 'Yes' : '']);
+    }
   }
 }
 const metrics = byId('metric-tables');
@@ -317,7 +324,17 @@ table(metrics,'Accuracy on each seen task (— indicates an unseen task)',
 table(metrics,'Equal-weight seen-task accuracy and change in percentage points',
   ['Method','Training stage','Seen average','Forgetting','Gain vs. frozen','Mean evidence IoU','Labeled intervals'],performance);
 table(metrics,'Update and inference costs (— indicates unavailable)',
-  ['Method','Training stage','Update (s)','Peak CUDA (MiB)','Mean latency (ms)','P95 latency (ms)','Replayed examples'],costs);
+  ['Method','Training stage','Update (s)','Peak CUDA (MiB)','Mean latency (ms)','P95 latency (ms)','Replayed examples',
+   'Windows estimated','Training reused from'],costs);
+if (online.length) table(metrics,'Online updates and question/answer-conditioned video retrieval',
+  ['Method','Checkpoint','Arrivals to date','Updates this interval','Replayed examples','Recall@1','MRR'],online);
+if (training.length) {
+  const history = element('details');
+  history.append(element('summary','Training and validation history'));
+  table(history,'Checkpoints minimize mean validation loss across seen tasks.',
+    ['Method','Training stage','Pass','Optimizer steps','Train loss','Validation loss','Selected checkpoint'],training);
+  metrics.append(history);
+}
 
 if (run.sensor) {
   byId('sensor').hidden = false;

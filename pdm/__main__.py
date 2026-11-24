@@ -6,7 +6,7 @@ import math
 import sys
 from pathlib import Path
 
-from .continual import CONDITIONS, retrieve
+from .continual import CONDITIONS, DEFAULT_CONDITIONS, retrieve
 from .data import generate_fixture, inference_input, load_manifest, prepare_nextqa, sensor_fixture
 from .experiment import checksum, restore, run_experiment, write_json
 from .models import build_model, predict
@@ -31,7 +31,9 @@ def arguments():
     for sub in (demo, run):
         sub.add_argument("--out", required=True, type=Path, help="a new run directory")
         sub.add_argument("--seed", type=int, default=42)
-        sub.add_argument("--conditions", nargs="+", choices=CONDITIONS, default=list(CONDITIONS))
+        sub.add_argument("--memory-capacity", type=int, help="override the number of stored training examples")
+        sub.add_argument("--passes", type=int, help="override the number of training passes per task")
+        sub.add_argument("--conditions", nargs="+", choices=CONDITIONS, default=list(DEFAULT_CONDITIONS))
     run.add_argument("--config", type=Path, required=True)
     run.add_argument("--manifest", type=Path, required=True)
     run.add_argument("--device")
@@ -40,12 +42,24 @@ def arguments():
     prep.add_argument("--videos", type=Path, required=True)
     prep.add_argument("--out", type=Path, required=True)
     prep.add_argument("--quick", action="store_true", help="select 8 train, 2 validation, 3 test questions per task")
+    grounding = commands.add_parser("evaluate-grounding", help="evaluate saved predictions against temporal annotations")
+    grounding.add_argument("--run-dir", type=Path, required=True)
+    grounding.add_argument("--annotations", type=Path, default=Path.home() / ".cache/pdm-framework/nextgqa",
+                           help="directory for the two pinned NExT-GQA test annotation files")
     prediction = commands.add_parser("predict", help="answer with a saved condition and checkpoint")
     prediction.add_argument("--run-dir", type=Path, required=True)
     prediction.add_argument("--condition", choices=CONDITIONS, default="pdm")
     prediction.add_argument("--stage", type=int, choices=[1, 2], default=2, help="how many tasks have been seen")
     prediction.add_argument("--sample-id")
     media_options(prediction)
+    retrieval = commands.add_parser("retrieve-video", help="rank candidate clips using a trained checkpoint")
+    retrieval.add_argument("--run-dir", required=True, type=Path)
+    retrieval.add_argument("--condition", choices=CONDITIONS, default="pdm_stream")
+    retrieval.add_argument("--stage", type=int, choices=(1, 2), default=2)
+    retrieval.add_argument("--question", required=True)
+    retrieval.add_argument("--choice", action="append", required=True)
+    retrieval.add_argument("--query-answer", required=True, help="one of the supplied choices, as query text")
+    retrieval.add_argument("--clip", action="append", required=True, type=Path)
     ask = commands.add_parser("ask", help="score a new video directly with pretrained Qwen")
     ask.add_argument("--device", default="cuda:0")
     media_options(ask)
@@ -66,13 +80,14 @@ def new_input(args):
     return item
 
 
-def read_config(path):
+def read_config(path, passes=None):
     config = json.loads(path.read_text())
-    if not isinstance(config, dict) or set(config) != {"profile", "steps", "learning_rate", "memory_capacity"}:
-        raise ValueError("configuration needs profile, steps, learning_rate and memory_capacity")
+    if not isinstance(config, dict) or set(config) - {"passes"} != {"profile", "steps", "learning_rate", "memory_capacity"}:
+        raise ValueError("configuration needs profile, steps, learning_rate and memory_capacity, with optional passes")
+    config["passes"] = config.get("passes", 1) if passes is None else passes
     if config["profile"] not in ("smoke", "nextqa", "nextqa_quick"):
         raise ValueError("unknown model/data profile")
-    for key in ("steps", "memory_capacity"):
+    for key in ("steps", "memory_capacity", "passes"):
         if type(config[key]) is not int or config[key] < 1:
             raise ValueError(f"{key} must be a positive integer")
     lr = config["learning_rate"]
@@ -82,6 +97,22 @@ def read_config(path):
 
 
 def execute(args):
+    if args.command == "evaluate-grounding":
+        from .grounding import evaluate_saved
+        evaluate_saved(args.run_dir, args.annotations)
+        return
+    if args.command == "retrieve-video":
+        from .stream import rank_clips
+        if (not args.question.strip() or len(args.choice) != 5 or not all(c.strip() for c in args.choice)
+                or args.choice.count(args.query_answer) != 1):
+            raise ValueError("supply a question, five nonempty choices, and one unambiguous matching query answer")
+        paths = [p.resolve(strict=True) for p in args.clip]
+        if len(paths) < 2 or len(set(paths)) != len(paths):
+            raise ValueError("supply at least two distinct candidate clips")
+        model, _, _ = restore(args.run_dir, args.condition, args.stage)
+        print(json.dumps(rank_clips(model, args.question, args.choice, args.choice.index(args.query_answer),
+                                    {str(p): p for p in paths}), allow_nan=False))
+        return
     if args.command == "prepare-nextqa":
         records = prepare_nextqa(args.annotations, args.videos, args.out, quick=args.quick)
         print(f"{len(records)} questions → {args.out}")
@@ -108,7 +139,11 @@ def execute(args):
         return
     demo = args.command == "demo"
     path = Path(__file__).parent / "configs" / f"{args.profile}.json" if demo else args.config
-    config = read_config(path)
+    config = read_config(path, args.passes)
+    if args.memory_capacity is not None:
+        if args.memory_capacity < 1:
+            raise ValueError("memory capacity must be positive")
+        config["memory_capacity"] = args.memory_capacity
     device = args.device or ("cpu" if config["profile"] == "smoke" else "cuda:0")
     if len(args.conditions) != len(set(args.conditions)):
         raise ValueError("conditions must be unique")

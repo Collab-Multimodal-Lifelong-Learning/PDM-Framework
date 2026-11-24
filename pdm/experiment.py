@@ -12,10 +12,11 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file, save_file
 
-from .continual import SELECTED, TRAINED, retrieve, update
+from .continual import SELECTED, TRAINED, WINDOW_REPLAY, remember, retrieve, update
 from .data import NEXTQA_HASHES, inference_input, read_manifest_rows, save_manifest
 from .models import QWEN_REVISION, VLM_RLAIF_REVISION, build_model, clear_video_cache, predict
 from .report import write_report
+from .stream import STREAM_METHODS, OnlineLearner, evaluate_retrieval
 
 OASIS_REVISION = "96e67e159397b851c4cc80cae559cef00370a8cf"
 
@@ -43,6 +44,16 @@ def backend(profile):
 
 def trainable_state(model):
     return {name: p.detach().cpu().contiguous() for name, p in model.named_parameters() if p.requires_grad}
+
+
+def load_adapter(model, path):
+    weights = load_file(path)
+    params = dict(model.named_parameters())
+    if weights.keys() != {k for k, p in params.items() if p.requires_grad}:
+        raise ValueError("checkpoint parameters differ from the adapter")
+    with torch.no_grad():
+        for k, v in weights.items():
+            params[k].copy_(v)
 
 
 def fingerprint(tensors):
@@ -130,14 +141,23 @@ def run_experiment(out, records, config, seed, conditions, device, sensor_item=N
         sync(device)
     predictions, metrics = [], {}
     sensor = sampler = None
+    retrieval_results = {}
+    arrivals = [r for r in records if r["split"] == "train"]
+    shared_first = None
     for name in conditions:
         model = build_model(backend(config["profile"]), seed, str(device))
         # Initialize inference kernels with an unlabeled validation input.
         warmup_item = inference_input(next(r for r in records if r["split"] == "val"))
         predict(model.eval(), warmup_item)
         memory, matrix, summaries = [], [], []
+        online = None
+        if name in STREAM_METHODS:
+            online = OnlineLearner(model, name, config["learning_rate"], config["memory_capacity"], seed)
+            retrieval_results[name] = []
         for stage in stages:
-            current = [r for r in records if r["stage"] == stage and r["split"] == "train"]
+            if online is None:
+                current = [r for r in records if r["stage"] == stage and r["split"] == "train"]
+                validation = [r for r in records if r["stage"] <= stage and r["split"] == "val"]
             tests = [r for r in records if r["stage"] <= stage and r["split"] == "test"]
             before = fingerprint(trainable_state(model))
             clear_video_cache()
@@ -145,7 +165,21 @@ def run_experiment(out, records, config, seed, conditions, device, sensor_item=N
                 torch.cuda.reset_peak_memory_stats(device)
             sync(device)
             start = time.perf_counter()
-            memory, audit = update(model, name, current, memory, config, seed, stage)
+            share_training = stage == stages[0] and name in ("pdm", *WINDOW_REPLAY)
+            shared_from = None
+            has_next = stage != stages[-1]
+            if online is not None:
+                # Reporting boundaries depend on stream length only. The learner persists between them.
+                stop = stage * len(arrivals) // len(stages)
+                memory, audit = online.update(arrivals[online.seen:stop])
+            elif share_training and shared_first is not None:
+                shared_from, path, training_audit = shared_first
+                load_adapter(model, path)
+                memory, count = remember(model, name, current, memory, config, seed, stage, has_next)
+                audit = dict(training_audit, window_extraction_count=count)
+            else:
+                memory, audit = update(model, name, current, memory, config, seed, stage,
+                                       validation=validation, has_next_task=has_next)
             sync(device)
             elapsed = time.perf_counter() - start
             peak = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
@@ -154,8 +188,11 @@ def run_experiment(out, records, config, seed, conditions, device, sensor_item=N
             checkpoint.mkdir(parents=True)
             if name in TRAINED:
                 save_file(weights, checkpoint / "adapter.safetensors")
-            write_lines(checkpoint / "memory.jsonl", ({"sample_id": r["sample_id"]} for r in memory))
-            state = dict(audit, condition=name, stage=stage, seed=seed, adapter_before=before,
+            if share_training and shared_first is None:
+                shared_first = name, checkpoint / "adapter.safetensors", audit
+            memory_fields = ("sample_id", "replay_window_ms", "source_stage", "teacher_logits")
+            write_lines(checkpoint / "memory.jsonl", ({k: r[k] for k in memory_fields if k in r} for r in memory))
+            state = dict(audit, condition=name, stage=stage, seed=seed, shared_training_from=shared_from, adapter_before=before,
                          adapter_after=fingerprint(weights), memory_sha256=checksum(checkpoint / "memory.jsonl"),
                          selector="oasis_inspired" if name in SELECTED else None)
             clear_video_cache()
@@ -169,11 +206,23 @@ def run_experiment(out, records, config, seed, conditions, device, sensor_item=N
                                   adaptation_gain=None, update_seconds=elapsed, peak_cuda_bytes=peak,
                                   mean_latency_ms=statistics.mean(latencies),
                                   p95_latency_ms=sorted(latencies)[math.ceil(.95*len(latencies))-1],
-                                  replay_count=len(audit["replay_ids"]), **evidence_stats(rows, by_id)))
+                                  replay_count=len(audit["replay_ids"]),
+                                  best_pass=audit["best_pass"], training_history=audit["training_history"],
+                                  shared_training_from=shared_from, window_extraction_count=audit["window_extraction_count"],
+                                  **evidence_stats(rows, by_id)))
+            if online is not None:
+                retrieval = evaluate_retrieval(model, tests, stage, seed)
+                retrieval_results[name].append(retrieval)
+                summaries[-1].update(retrieval_r1=retrieval["recall_at_1"], retrieval_mrr=retrieval["mrr"],
+                                     online_updates=audit["optimizer_steps"], stream_seen=audit["stream_seen"])
             predictions.extend(rows)
             write_json(checkpoint / "state.json", state)
             print(f"{name} | task {stage} | accuracies " + ", ".join(f"{v:.1%}" for v in scores),
                   file=sys.stderr, flush=True)
+            if audit["best_pass"] is not None:
+                best = audit["training_history"][audit["best_pass"] - 1]
+                print(f"  carried pass {best['pass']}/{len(audit['training_history'])}, "
+                      f"validation loss {best['validation_loss']:.4f}", file=sys.stderr, flush=True)
             if name == "frozen" and stage == stages[-1] and backend(config["profile"]) == "nextqa":
                 sampler = sampler_comparison(model, tests, rows)
             if sensor_item and name == ("pdm" if "pdm" in conditions else conditions[0]) and stage == stages[-1]:
@@ -182,13 +231,15 @@ def run_experiment(out, records, config, seed, conditions, device, sensor_item=N
                 sensor = {"condition": name, "stage": stage, "clip_path": sensor_item["clip_path"],
                           "off": predict(model, video_only, context), "on": predict(model, sensor_item, context)}
         metrics[name] = {"accuracy_matrix": matrix, "stages": summaries}
-        del model
+        del online, model
     if "frozen" in metrics:
         for entry in metrics.values():
             for i, summary in enumerate(entry["stages"]):
                 summary["adaptation_gain"] = entry["accuracy_matrix"][i][i] - metrics["frozen"]["accuracy_matrix"][i][i]
     write_lines(out / "predictions.jsonl", predictions)
     write_json(out / "metrics.json", metrics)
+    if retrieval_results:
+        write_json(out / "retrieval.json", retrieval_results)
     if sensor:
         write_json(out / "sensor_comparison.json", dict(sensor, clip_path=os.path.relpath(sensor["clip_path"], out)))
     if sampler:
@@ -214,16 +265,11 @@ def restore(out, name, stage):
     # A new prediction needs pixels only for the clip being scored.
     records = read_manifest_rows(manifest)
     by_id = {r["sample_id"]: r for r in records}
-    memory = [by_id[json.loads(line)["sample_id"]] for line in (checkpoint / "memory.jsonl").read_text().splitlines()]
+    entries = map(json.loads, (checkpoint / "memory.jsonl").read_text().splitlines())
+    memory = [dict(by_id[entry["sample_id"]], **entry) for entry in entries]
     model = build_model(backend(info["profile"]), info["seed"], info["device"])
     if name in TRAINED:
-        weights = load_file(checkpoint / "adapter.safetensors")
-        params = dict(model.named_parameters())
-        if weights.keys() != {k for k, p in params.items() if p.requires_grad}:
-            raise ValueError("checkpoint parameters differ from the adapter")
-        with torch.no_grad():
-            for k, v in weights.items():
-                params[k].copy_(v)
+        load_adapter(model, checkpoint / "adapter.safetensors")
     if fingerprint(trainable_state(model)) != state["adapter_after"]:
         raise ValueError("adapter fingerprint mismatch")
     return model.eval(), by_id, memory
