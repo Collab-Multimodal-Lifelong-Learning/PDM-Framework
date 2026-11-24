@@ -4,6 +4,8 @@
 
 PDM-Framework trains a multimodal browser agent across two simulated services. On **OpenDining**, the agent follows a restaurant reservation request. On **UDriver**, it follows a ride request. You can give a saved agent your own instruction, compare checkpoints on the same benchmark tasks, and inspect the browser actions behind each booking.
 
+**Why PDM-Framework?** This browser agent puts the project's *Pre-trained, Data, Memory* approach to continual learning into practice. One pre-trained vision-language model (**P**) learns from paired observations and actions (**D**) on OpenDining, then adapts to UDriver by training on ride demonstrations alongside restaurant examples kept in a bounded memory (**M**). Testing the same restaurant requests before and after ride training, alongside a baseline trained on ride actions alone during the switch, lets us ask whether memory helps the agent retain its earlier skill as it learns the new one.
+
 ## How the agent works
 
 At each step, the policy receives the user's instruction, a screenshot, the current URL, a numbered accessibility tree and recent actions. It generates one command, such as clicking a time slot or filling a pickup field. Chromium executes the command and returns the next observation. The trace preserves the model's response, the parsed action and any browser error. [Browser runtime](pdm/browser.py)
